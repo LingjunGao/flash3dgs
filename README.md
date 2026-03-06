@@ -10,8 +10,8 @@ First, create and activate a conda environment with the required dependencies:
 
 ```bash
 # create conda environment
-conda create --name gsplat -y python=3.10
-conda activate gsplat
+conda create --name flash3dgs -y python=3.10
+conda activate flash3dgs
 pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
 conda install -c "nvidia/label/cuda-11.8.0" cuda-toolkit
 ```
