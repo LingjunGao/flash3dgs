@@ -53,8 +53,38 @@ conda activate "${ENV_NAME}"
 
 echo "[4/6] Installing Python/CUDA dependencies..."
 python -m pip install -U pip
+
+# Ensure CUDA 11.8 is installed and set it as the active CUDA version
+echo "Checking for CUDA 11.8..."
+CUDA_118_PATH=""
+
+# Check common CUDA installation paths
+if [[ -d "/usr/local/cuda-11.8" ]]; then
+  CUDA_118_PATH="/usr/local/cuda-11.8"
+  echo "Found CUDA 11.8 at: $CUDA_118_PATH"
+else
+  # Check conda environment
+  if [[ -d "${CONDA_PREFIX}/pkgs/cuda-toolkit-11.8"* ]] || [[ -d "${CONDA_PREFIX}/lib/nvvm" ]]; then
+    CUDA_118_PATH="${CONDA_PREFIX}"
+    echo "Found CUDA 11.8 in conda environment"
+  else
+    echo "CUDA 11.8 not found. Installing via conda..."
+    conda install -y -c "nvidia/label/cuda-11.8.0" cuda-toolkit
+    CUDA_118_PATH="${CONDA_PREFIX}"
+  fi
+fi
+
+# Set CUDA paths to use 11.8
+if [[ -d "$CUDA_118_PATH" ]]; then
+  export PATH="${CUDA_118_PATH}/bin:${PATH}"
+  export LD_LIBRARY_PATH="${CUDA_118_PATH}/lib64:${LD_LIBRARY_PATH}"
+  export CUDA_HOME="${CUDA_118_PATH}"
+  echo "Set CUDA_HOME to: ${CUDA_118_PATH}"
+fi
+
+echo "Installing PyTorch for CUDA 11.8..."
 python -m pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
-conda install -y -c "nvidia/label/cuda-11.8.0" cuda-toolkit
+
 python -m pip install --no-cache-dir "numpy==1.26.4" "setuptools==69.5.1" "wheel<0.43" ninja packaging
 
 echo "[5/6] Installing FLASH3DGS from source..."
