@@ -77,7 +77,7 @@ fi
 # Set CUDA paths to use 11.8
 if [[ -d "$CUDA_118_PATH" ]]; then
   export PATH="${CUDA_118_PATH}/bin:${PATH}"
-  export LD_LIBRARY_PATH="${CUDA_118_PATH}/lib64:${LD_LIBRARY_PATH}"
+  export LD_LIBRARY_PATH="${CUDA_118_PATH}/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
   export CUDA_HOME="${CUDA_118_PATH}"
   echo "Set CUDA_HOME to: ${CUDA_118_PATH}"
 fi
