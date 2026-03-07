@@ -9,22 +9,32 @@ FLASH3DGS is an optimized system and algorithm co-design for accelerating 3D Gau
 First, create and activate a conda environment with the required dependencies:
 
 ```bash
-# create conda environment
-conda create --name flash3dgs -y python=3.10
+apt-get update
+apt-get install -y git wget build-essential gcc-11 g++-11
+
+conda create -n flash3dgs -y python=3.10
 conda activate flash3dgs
-pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+
+python -m pip install -U pip
+python -m pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
 conda install -c "nvidia/label/cuda-11.8.0" cuda-toolkit
+
+python -m pip install --no-cache-dir "numpy==1.26.4" "setuptools==69.5.1" "wheel<0.43" ninja packaging
 ```
 
 ### Install FLASH3DGS from Source
 
 Clone and install the FLASH3DGS repository:
 
-```bashFLASH3DGS: ALGORITHM AND SYSTEM CO-OPTIMIZATION FOR
-FAST 3D GAUSSIAN SPLATTING ON GPUS
+```bash
 git clone --recurse-submodules https://github.com/LingjunGao/flash3dgs
 cd flash3dgs/
-pip install -e .
+
+export CC=/usr/bin/gcc-11
+export CXX=/usr/bin/g++-11
+export CUDAHOSTCXX=/usr/bin/g++-11
+
+python -m pip install -e . --no-build-isolation
 ```
 
 ### Download Dataset
@@ -33,7 +43,7 @@ Navigate to the examples directory and download the benchmark dataset:
 
 ```bash
 cd examples
-pip install -r requirements.txt
+pip install -r requirements.txt --no-build-isolation
 python datasets/download_dataset.py
 ```
 
