@@ -130,6 +130,9 @@ class Config:
     # Number of repeated evaluation passes in eval-only runs.
     # The final reported metrics/timings are averaged across runs.
     eval_num_runs: int = 10
+    # Optional path to write per-run evaluation stats as JSONL (one line per run).
+    # Used by Evaluation.sh to collect detailed per-run data.
+    eval_output_jsonl: Optional[str] = None
 
     # Use random background for training to discourage transparency
     random_bkgd: bool = False
@@ -775,17 +778,6 @@ class Runner:
             # save checkpoint before updating the model
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
                 mem = torch.cuda.max_memory_allocated() / 1024**3
-                stats = {
-                    "mem": mem,
-                    "ellipse_time": time.time() - global_tic,
-                    "num_GS": len(self.splats["means"]),
-                }
-                print("Step: ", step, stats)
-                with open(
-                    f"{self.stats_dir}/train_step{step:04d}_rank{self.world_rank}.json",
-                    "w",
-                ) as f:
-                    json.dump(stats, f)
                 data = {"step": step, "splats": self.splats.state_dict()}
                 if cfg.pose_opt:
                     if world_size > 1:
@@ -806,14 +798,14 @@ class Runner:
                     print(f"Benchmarking sorting methods at checkpoint step {step}...")
 
                 # Evaluate twice and compare average sorting time per image.
-                time_original = self.eval(
+                stats_original = self.eval(
                     step,
                     stage="eval_original_sorting",
                     force_es=False,
                     skip_render=True,
                     num_runs=1,
                 )
-                time_early = self.eval(
+                stats_early = self.eval(
                     step,
                     stage="eval_early_sorting",
                     force_es=True,
@@ -822,6 +814,8 @@ class Runner:
                 )
 
                 if self.world_rank == 0:
+                    time_original = stats_original.get("IT", 0.0) if isinstance(stats_original, dict) else float(stats_original)
+                    time_early = stats_early.get("IT", 0.0) if isinstance(stats_early, dict) else float(stats_early)
                     decision_path, use_early_sorting = self._save_sorting_decision(
                         step=step,
                         time_original=time_original,
@@ -831,6 +825,13 @@ class Runner:
                         f"-> Sorting decision saved: early_sorting={use_early_sorting} "
                         f"(early={time_early:.6f}s, original={time_original:.6f}s) at {decision_path}"
                     )
+
+                    # Write a single consolidated stats file per checkpoint with 2 lines.
+                    consolidated_path = f"{self.stats_dir}/step{step}.jsonl"
+                    with open(consolidated_path, "w") as f:
+                        f.write(json.dumps(stats_original) + "\n")
+                        f.write(json.dumps(stats_early) + "\n")
+                    print(f"Stats saved to {consolidated_path}")
                 
             if (
                 step in [i - 1 for i in cfg.ply_steps] or step == max_steps - 1
@@ -942,6 +943,7 @@ class Runner:
         force_es=None,
         skip_render=False,
         num_runs: Optional[int] = None,
+        output_jsonl: Optional[str] = None,
     ):
         """Entry for evaluation."""
         print("Running evaluation...")
@@ -953,12 +955,16 @@ class Runner:
         runs = int(num_runs if num_runs is not None else cfg.eval_num_runs)
         runs = max(runs, 1)
 
+        # Resolve output JSONL path: explicit param > config
+        jsonl_path = output_jsonl or cfg.eval_output_jsonl
+
         run_pts = []
         run_its = []
         run_rts = []
         run_tts = []
         run_tts_per_image = []
         run_metrics = defaultdict(list)
+        all_run_compact: List[dict] = []
         if world_rank == 0:
             print(
                 f"[{stage}] eval_use_optimized_raster={cfg.eval_use_optimized_raster}, eval_num_runs={runs}"
@@ -1021,13 +1027,11 @@ class Runner:
                 rts.append(float(t["rt"]))
                 tts.append(float(t["tt"]))
 
-                if not skip_render:
-                    colors = torch.clamp(colors, 0.0, 1.0)
-                    canvas_list = [pixels, colors]
+                colors = torch.clamp(colors, 0.0, 1.0)
 
-                # Save render images only for the first run to avoid duplicate overwrite.
+                # Save render images only when requested and only on first run.
                 if world_rank == 0 and not skip_render and run_idx == 0:
-                    canvas = torch.cat(canvas_list, dim=2).squeeze(0).cpu().numpy()
+                    canvas = torch.cat([pixels, colors], dim=2).squeeze(0).cpu().numpy()
                     canvas = (canvas * 255).astype(np.uint8)
                     es_str = "early_sort" if es else "orig_sort"
                     imageio.imwrite(
@@ -1035,7 +1039,8 @@ class Runner:
                         canvas,
                     )
 
-                if world_rank == 0 and not skip_render:
+                # Always compute quality metrics.
+                if world_rank == 0:
                     pixels_p = pixels.permute(0, 3, 1, 2)  # [1, 3, H, W]
                     colors_p = colors.permute(0, 3, 1, 2)  # [1, 3, H, W]
                     metrics["psnr"].append(self.psnr(colors_p, pixels_p))
@@ -1047,57 +1052,79 @@ class Runner:
                         metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
 
             if world_rank == 0:
-                run_pts.append(_safe_mean(pts))
-                run_its.append(_safe_mean(its))
-                run_rts.append(_safe_mean(rts))
-                run_tts.append(_safe_mean(tts))
+                run_pt = _safe_mean(pts)
+                run_it = _safe_mean(its)
+                run_rt = _safe_mean(rts)
+                run_tt = _safe_mean(tts)
+                run_pts.append(run_pt)
+                run_its.append(run_it)
+                run_rts.append(run_rt)
+                run_tts.append(run_tt)
                 run_tts_per_image.append(tts)
+                per_run_metrics = {}
                 for k, v in metrics.items():
                     if len(v) > 0:
-                        run_metrics[k].append(torch.stack(v).mean().item())
+                        val = torch.stack(v).mean().item()
+                        run_metrics[k].append(val)
+                        per_run_metrics[k] = val
+                # Collect per-run compact stats
+                all_run_compact.append({
+                    "num_gs": len(self.splats["means"]),
+                    "PSNR": round(per_run_metrics.get("psnr", 0.0), 4),
+                    "SSIM": round(per_run_metrics.get("ssim", 0.0), 5),
+                    "LPIPS": round(per_run_metrics.get("lpips", 0.0), 4),
+                    "PT": run_pt,
+                    "IT": run_it,
+                    "RT": run_rt,
+                    "TT": run_tt,
+                    "use_early_sorting": bool(es),
+                })
         if world_rank == 0:
             pt = float(np.mean(run_pts)) if len(run_pts) > 0 else 0.0
             it = float(np.mean(run_its)) if len(run_its) > 0 else 0.0
             rt = float(np.mean(run_rts)) if len(run_rts) > 0 else 0.0
             tt = float(np.mean(run_tts)) if len(run_tts) > 0 else 0.0
-            per_image_tt = []
-            if len(run_tts_per_image) > 0:
-                per_image_tt = np.mean(np.array(run_tts_per_image, dtype=np.float64), axis=0).tolist()
 
-            stats = {}
+            avg_metrics = {}
             if len(run_metrics) > 0:
-                stats = {k: float(np.mean(v)) for k, v in run_metrics.items() if len(v) > 0}
-            stats.update(
-                {
-                    "num_GS": len(self.splats["means"]),
-                    "projection_time": pt,
-                    "intersection_time": it,
-                    "rasterisation_time": rt,
-                    "total_time": tt,
-                    "per_image_total_time": per_image_tt,
-                    "eval_num_runs": runs,
-                    "use_early_sorting": bool(es),
-                }
+                avg_metrics = {k: float(np.mean(v)) for k, v in run_metrics.items() if len(v) > 0}
+
+            print(
+                f"[{stage}] PSNR: {avg_metrics.get('psnr',0):.3f}, "
+                f"SSIM: {avg_metrics.get('ssim',0):.4f}, "
+                f"LPIPS: {avg_metrics.get('lpips',0):.3f} "
+                f"TT: {tt:.5f}s/image  "
+                f"num_GS: {len(self.splats['means'])}"
             )
-            if decision_file is not None:
-                stats["sorting_decision_file"] = decision_file
-            
-            if not skip_render:
-                print(
-                    f"PSNR: {stats.get('psnr',0):.3f}, SSIM: {stats.get('ssim',0):.4f}, LPIPS: {stats.get('lpips',0):.3f} "
-                    f"Time: {stats['total_time']:.5f}s/image "
-                    f"Number of GS: {stats['num_GS']}"
-                )
-            
-            # save stats as jsonl (append one line per evaluation call)
-            self._append_jsonl(f"{self.stats_dir}/{stage}_step{step:04d}.json", stats)
+
+            # Build averaged compact stats
+            compact_stats = {
+                "num_gs": len(self.splats["means"]),
+                "PSNR": round(avg_metrics.get("psnr", 0.0), 4),
+                "SSIM": round(avg_metrics.get("ssim", 0.0), 5),
+                "LPIPS": round(avg_metrics.get("lpips", 0.0), 4),
+                "PT": pt,
+                "IT": it,
+                "RT": rt,
+                "TT": tt,
+                "use_early_sorting": bool(es),
+            }
+
+            # Write per-run JSONL if an output path was requested
+            if jsonl_path:
+                os.makedirs(os.path.dirname(os.path.abspath(jsonl_path)), exist_ok=True)
+                with open(jsonl_path, "w") as f:
+                    for rs in all_run_compact:
+                        f.write(json.dumps(rs) + "\n")
+                print(f"Per-run stats ({len(all_run_compact)} lines) saved to {jsonl_path}")
+
             # save stats to tensorboard
-            for k, v in stats.items():
+            for k, v in compact_stats.items():
                 if isinstance(v, (int, float)):
                     self.writer.add_scalar(f"{stage}/{k}", v, step)
             self.writer.flush()
-            return stats.get("intersection_time", 0)
-        return 0
+            return compact_stats
+        return {}
 
     @torch.no_grad()
     def render_traj(self, step: int):
