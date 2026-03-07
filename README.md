@@ -4,6 +4,22 @@ FLASH3DGS is an optimized system and algorithm co-design for accelerating 3D Gau
 
 ## Installation
 
+### One-command setup (recommended)
+
+From the FLASH3DGS root directory, run:
+
+```bash
+source ./setup_flash3dgs.sh
+```
+
+This command will:
+- install required system packages,
+- create and activate the `flash3dgs` conda environment,
+- install FLASH3DGS and Python dependencies,
+- download the benchmark dataset.
+
+> If you run `bash ./setup_flash3dgs.sh`, setup will still run, but conda activation will not stay active in your current shell.
+
 ### Environment Setup
 
 First, create and activate a conda environment with the required dependencies:
